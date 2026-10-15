@@ -110,10 +110,40 @@ ps -eo pid,etimes,cmd | grep -E "make|clang" | grep -v grep
 
 | item | state |
 |---|---|
-| local GKI build | **still running**, ~213 objects, 0 errors |
+| local GKI build | still running, ~680 objects, 0 compile errors |
 | `/content/out-gki/Image` | not produced yet |
-| `build-gki` CI | first run failed (`no kernel tree at …/gki-android16-6.12`) |
-| fix | `TREE=gki-src` in the build step, commit `5753436e3` — **CI re-run not yet confirmed** |
+| `build-gki` CI | `TREE` fix confirmed — now fails much later, at the **vmlinux link** |
+
+### Open CI failure: BTF at the vmlinux link
+
+After the `TREE` fix (`5753436e3`) the workflow compiles the whole kernel and then
+fails at the last step:
+
+```
+Reached the limit of per-CPU variables: 4096      <- warning, common in GKI
+BTFIDS  vmlinux
+FAILED: load BTF from vmlinux: Invalid argument
+make[3]: *** [.../scripts/Makefile.vmlinux:45: vmlinux] Error 255
+```
+
+`FAILED: load BTF from vmlinux` is emitted by `resolve_btfids`, i.e. the final BTF pass,
+not by compilation — so every `.o` built cleanly. Leading hypotheses, in order:
+
+1. **pahole out of memory.** GKI vmlinux is large and pahole holds the whole BTF;
+   `resolve_btfids` commonly dies on a memory-limited runner. The GitHub-hosted
+   arm64 jobs are the place to test this — this sandbox has 12 GB / 2 cores.
+   Try `--targets "Image"` (already done) versus a plain `vmlinux`, and compare a
+   run on a larger runner.
+2. **pahole too old.** `gki_defconfig` sets `CONFIG_PAHOLE_VERSION`; an installed
+   `pahole` older than what the BTF format expects fails this way. Compare
+   `pahole --version` against `CONFIG_PAHOLE_VERSION` in `gki.config`.
+3. The per-CPU warning is almost certainly incidental — GKI builds routinely hit it.
+
+Next diagnostic to run: capture `pahole --version`, `grep PAHOLE out-gki/gki.config`,
+and free memory during the `BTFIDS` step. Disabling BTF (`scripts/config --disable
+DEBUG_INFO_BTF`) will confirm the diagnosis by making the build complete — at the cost
+of an unusable GKI, since BTF is required for eBPF/CO-RE, which is most of what GKI is
+for.
 
 ---
 
