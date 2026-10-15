@@ -114,7 +114,7 @@ ps -eo pid,etimes,cmd | grep -E "make|clang" | grep -v grep
 | `/content/out-gki/Image` | not produced yet |
 | `build-gki` CI | `TREE` fix confirmed — now fails much later, at the **vmlinux link** |
 
-### CI failure: BTF at the vmlinux link — ROOT CAUSED AND FIXED
+### CI failure: BTF at the vmlinux link — UNRESOLVED (two hypotheses disproven)
 
 ```
 BTFIDS  vmlinux
@@ -122,51 +122,56 @@ FAILED: load BTF from vmlinux: Invalid argument
 make[3]: *** [.../scripts/Makefile.vmlinux:45: vmlinux] Error 255
 ```
 
-**Root cause, traced through the source rather than guessed:**
+**What is established fact:**
 
 1. `scripts/link-vmlinux.sh:283` runs `${RESOLVE_BTFIDS} vmlinux`.
 2. -> `btf__parse_split()` -> `btf_parse_elf()` -> `btf_new()` -> `btf_parse_hdr()`.
 3. `tools/lib/bpf/btf.c:228`: `if (btf->raw_size < sizeof(struct btf_header))
-   return -EINVAL;`. `sizeof(struct btf_header)` is **24 bytes**. So EINVAL means
-   the `.BTF` section in the final `vmlinux` is **empty or absent** — not a version,
-   endianness, or memory problem.
-4. Why empty? `gen_btf()` at `link-vmlinux.sh:119` is:
+   return -EINVAL;`. `sizeof(struct btf_header)` is **24 bytes**. So the `.BTF`
+   section in the final `vmlinux` is **present but under 24 bytes** — i.e. empty.
+   (`btf_find_elf_sections` would have returned `-ENODATA` had the section been
+   missing entirely, so it exists but is empty.)
+4. `gen_btf()` at `link-vmlinux.sh:119` runs
+   `LLVM_OBJCOPY="${OBJCOPY}" ${PAHOLE} -J ${PAHOLE_FLAGS} ${1}` with
+   **no exit-status check**, and the following `${OBJCOPY} --only-section=.BTF ...`
+   has `2>/dev/null`. Both can fail silently; only the final EINVAL surfaces.
+5. The only thing pahole prints is
+   `Reached the limit of per-CPU variables: 4096` (that string is **not** in the
+   kernel source — it comes from pahole).
 
-   ```sh
-   LLVM_OBJCOPY="${OBJCOPY}" ${PAHOLE} -J ${PAHOLE_FLAGS} ${1}
-   ```
+**Hypothesis A — DWARF5 vs pahole 1.25 — DISPROVEN.**
+`gki_defconfig` selects `CONFIG_DEBUG_INFO_DWARF5=y`, and pahole 1.25's DWARF5
+support is incomplete, so this looked like the cause. Forced
+`CONFIG_DEBUG_INFO_DWARF4=y` (commit `4d64ed27`); CI confirmed
+`CONFIG_DEBUG_INFO_DWARF4=y` was applied and the failure was **byte-for-byte
+identical**. DWARF5 is not the cause. The override is kept only because DWARF4 is
+the conventional pahole-1.x pairing — it is **not** a demonstrated fix.
 
-   **There is no exit-status check on pahole.** A pahole failure produces no `.BTF`;
-   `objcopy --only-section=.BTF` then emits an empty section; it is linked into
-   `vmlinux`; the only symptom appears ~2s later as the EINVAL above.
+**Hypothesis B — `llvm-objcopy` instead of GNU objcopy — DISPROVEN.**
+Under `LLVM=1`, `${OBJCOPY}` is `llvm-objcopy`, which is used to build
+`.tmp_vmlinux1.btf.o`; a failure there is swallowed by `2>/dev/null`. Tested
+directly on a synthetic arm64 ELF carrying a 64-byte `.BTF`: both
+`aarch64-linux-gnu-objcopy` and `llvm-objcopy-18` preserve the section exactly
+(`000040` bytes, rc=0). The objcopy step is not inherently broken.
 
-5. Why did pahole fail? `gki_defconfig` selects **`CONFIG_DEBUG_INFO_DWARF5=y`** while
-   `CONFIG_PAHOLE_VERSION=125` requests pahole 1.25, whose DWARF5 support is
-   incomplete. The log shows `BTF .tmp_vmlinux1.btf.o` followed only by the incidental
-   `Reached the limit of per-CPU variables: 4096`; no pahole error, because nothing
-   checks for one.
+**Remaining lead: pahole itself is failing.** The per-CPU-variable limit of 4096 is
+the only diagnostic pahole emits, and it is the one thing consistent with an
+empty `.BTF`. GKI's config has an unusually large per-CPU variable count.
+`scripts/Makefile.btf` also has an explicit branch for **pahole >= 1.26**
+(`--btf_features=encode_force,var,float,enum64,...`) that pahole 1.25 never
+reaches, which suggests the tree targets a newer pahole than 1.25.
+Ubuntu noble only ships `dwarves` 1.25, and `github.com/matrosov/pahole` was not
+reachable from this environment, so a newer pahole could not be built or fetched.
 
-**Fix (commit `4d64ed27`, branch `gki`)** — select `CONFIG_DEBUG_INFO_DWARF4`, the
-known-good pairing for pahole 1.x, in `build-gki.sh` right after `gki_defconfig`:
+**How to confirm (needs one full build, ~32 min on CI):** keep the build alive past
+the link by running `resolve_btfids` manually, or patch `gen_btf()` to check
+`${PAHOLE}`'s exit status — that alone turns a 4-minute silent failure into an
+immediate, explicit error.
 
-```sh
-"$TREE/scripts/config" --file "$kdir/.config" \
-  --disable DEBUG_INFO_DWARF5 \
-  --enable  DEBUG_INFO_DWARF4
-make -C "$TREE" "${make_args[@]}" olddefconfig
-```
-
-Verified in isolation: `CONFIG_DEBUG_INFO_DWARF5=y` -> `CONFIG_DEBUG_INFO_DWARF4=y`.
-
-**Also added a self-diagnosing BTF check.** Because `gen_btf()` cannot report the
-failure, `build-gki.sh` now reads the `.BTF` section size from `vmlinux` via
-`readelf -S` and fails immediately with an actionable message when it is under 24
-bytes, instead of surfacing an opaque `Invalid argument` four minutes later.
-
-**Ruled out:** pahole version mismatch (CI and local both have v1.25, config wants
-125); zstd (pahole links `libzstd.so.1`, so `CONFIG_DEBUG_INFO_COMPRESSED_ZSTD=y` is
-supported); OOM (no kill in the log, and EINVAL not ENOMEM); the per-CPU warning
-(incidental to GKI builds generally).
+**Fallback if it cannot be resolved:** `scripts/config --disable DEBUG_INFO_BTF`
+makes the build complete and produces a working GKI `Image`, but without BTF the
+kernel cannot serve eBPF/CO-RE — which is a large part of what GKI exists for. That
+is a real trade-off, not a clean fix.
 
 ---
 

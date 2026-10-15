@@ -10,7 +10,7 @@ Snapshot of all repos touched this session, and what still needs a human decisio
 |---|---|---|---|
 | `methylamphetamine/mt6785-mainline` | `7.1` | `f0e3b425` | green |
 | `methylamphetamine/mt6785-mainline` | `6.16` | `a999a6c5` | green |
-| `methylamphetamine/mt6785-mainline` | `gki` | `4d64ed27` | re-run pending (BTF/DWARF4 fix) |
+| `methylamphetamine/mt6785-mainline` | `gki` | `ef4a87bf` | failing at vmlinux BTF link (unresolved) |
 | `methylamphetamine/mt6785-mainline` | `battery-downstream` | `fad73078` | untouched |
 | `methylamphetamine/handoff-mt6785-mainline-begonia` | `main` | this repo | n/a |
 | `aosp-mirror/kernel_common` | `android16-6.12` | `105b5745f` | read-only, never pushed |
@@ -53,10 +53,13 @@ correct as-is. If you would rather ship a single panel:
 
 Flashing the wrong panel gives a black screen. Worth confirming on-device.
 
-### 4. Confirm `build-gki` CI after `4d64ed27`
+### 4. `build-gki` CI still fails at the vmlinux BTF link
 
-Two failures fixed so far: `TREE` mismatch, then the BTF/`resolve_btfids` EINVAL
-(root-caused to pahole 1.25 + DWARF5 -> forced DWARF4). Awaiting a green run.
+Fixed so far: `TREE` mismatch, and a real relative-`O=` path bug
+(`ef4a87bf`) that had been silently skipping the config fragment under CI.
+The remaining `FAILED: load BTF from vmlinux: Invalid argument` is **not solved**;
+DWARF5 and llvm-objcopy were both tested and disproven. See the GKI session file for
+what is established and the remaining pahole lead.
 
 ### 5. Decide whether GKI work continues
 
