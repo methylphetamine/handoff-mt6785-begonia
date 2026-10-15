@@ -114,36 +114,59 @@ ps -eo pid,etimes,cmd | grep -E "make|clang" | grep -v grep
 | `/content/out-gki/Image` | not produced yet |
 | `build-gki` CI | `TREE` fix confirmed — now fails much later, at the **vmlinux link** |
 
-### Open CI failure: BTF at the vmlinux link
-
-After the `TREE` fix (`5753436e3`) the workflow compiles the whole kernel and then
-fails at the last step:
+### CI failure: BTF at the vmlinux link — ROOT CAUSED AND FIXED
 
 ```
-Reached the limit of per-CPU variables: 4096      <- warning, common in GKI
 BTFIDS  vmlinux
 FAILED: load BTF from vmlinux: Invalid argument
 make[3]: *** [.../scripts/Makefile.vmlinux:45: vmlinux] Error 255
 ```
 
-`FAILED: load BTF from vmlinux` is emitted by `resolve_btfids`, i.e. the final BTF pass,
-not by compilation — so every `.o` built cleanly. Leading hypotheses, in order:
+**Root cause, traced through the source rather than guessed:**
 
-1. **pahole out of memory.** GKI vmlinux is large and pahole holds the whole BTF;
-   `resolve_btfids` commonly dies on a memory-limited runner. The GitHub-hosted
-   arm64 jobs are the place to test this — this sandbox has 12 GB / 2 cores.
-   Try `--targets "Image"` (already done) versus a plain `vmlinux`, and compare a
-   run on a larger runner.
-2. **pahole too old.** `gki_defconfig` sets `CONFIG_PAHOLE_VERSION`; an installed
-   `pahole` older than what the BTF format expects fails this way. Compare
-   `pahole --version` against `CONFIG_PAHOLE_VERSION` in `gki.config`.
-3. The per-CPU warning is almost certainly incidental — GKI builds routinely hit it.
+1. `scripts/link-vmlinux.sh:283` runs `${RESOLVE_BTFIDS} vmlinux`.
+2. -> `btf__parse_split()` -> `btf_parse_elf()` -> `btf_new()` -> `btf_parse_hdr()`.
+3. `tools/lib/bpf/btf.c:228`: `if (btf->raw_size < sizeof(struct btf_header))
+   return -EINVAL;`. `sizeof(struct btf_header)` is **24 bytes**. So EINVAL means
+   the `.BTF` section in the final `vmlinux` is **empty or absent** — not a version,
+   endianness, or memory problem.
+4. Why empty? `gen_btf()` at `link-vmlinux.sh:119` is:
 
-Next diagnostic to run: capture `pahole --version`, `grep PAHOLE out-gki/gki.config`,
-and free memory during the `BTFIDS` step. Disabling BTF (`scripts/config --disable
-DEBUG_INFO_BTF`) will confirm the diagnosis by making the build complete — at the cost
-of an unusable GKI, since BTF is required for eBPF/CO-RE, which is most of what GKI is
-for.
+   ```sh
+   LLVM_OBJCOPY="${OBJCOPY}" ${PAHOLE} -J ${PAHOLE_FLAGS} ${1}
+   ```
+
+   **There is no exit-status check on pahole.** A pahole failure produces no `.BTF`;
+   `objcopy --only-section=.BTF` then emits an empty section; it is linked into
+   `vmlinux`; the only symptom appears ~2s later as the EINVAL above.
+
+5. Why did pahole fail? `gki_defconfig` selects **`CONFIG_DEBUG_INFO_DWARF5=y`** while
+   `CONFIG_PAHOLE_VERSION=125` requests pahole 1.25, whose DWARF5 support is
+   incomplete. The log shows `BTF .tmp_vmlinux1.btf.o` followed only by the incidental
+   `Reached the limit of per-CPU variables: 4096`; no pahole error, because nothing
+   checks for one.
+
+**Fix (commit `4d64ed27`, branch `gki`)** — select `CONFIG_DEBUG_INFO_DWARF4`, the
+known-good pairing for pahole 1.x, in `build-gki.sh` right after `gki_defconfig`:
+
+```sh
+"$TREE/scripts/config" --file "$kdir/.config" \
+  --disable DEBUG_INFO_DWARF5 \
+  --enable  DEBUG_INFO_DWARF4
+make -C "$TREE" "${make_args[@]}" olddefconfig
+```
+
+Verified in isolation: `CONFIG_DEBUG_INFO_DWARF5=y` -> `CONFIG_DEBUG_INFO_DWARF4=y`.
+
+**Also added a self-diagnosing BTF check.** Because `gen_btf()` cannot report the
+failure, `build-gki.sh` now reads the `.BTF` section size from `vmlinux` via
+`readelf -S` and fails immediately with an actionable message when it is under 24
+bytes, instead of surfacing an opaque `Invalid argument` four minutes later.
+
+**Ruled out:** pahole version mismatch (CI and local both have v1.25, config wants
+125); zstd (pahole links `libzstd.so.1`, so `CONFIG_DEBUG_INFO_COMPRESSED_ZSTD=y` is
+supported); OOM (no kill in the log, and EINVAL not ENOMEM); the per-CPU warning
+(incidental to GKI builds generally).
 
 ---
 

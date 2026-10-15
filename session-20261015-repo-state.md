@@ -10,7 +10,7 @@ Snapshot of all repos touched this session, and what still needs a human decisio
 |---|---|---|---|
 | `methylamphetamine/mt6785-mainline` | `7.1` | `f0e3b425` | green |
 | `methylamphetamine/mt6785-mainline` | `6.16` | `a999a6c5` | green |
-| `methylamphetamine/mt6785-mainline` | `gki` | `5753436e3` | re-run pending |
+| `methylamphetamine/mt6785-mainline` | `gki` | `4d64ed27` | re-run pending (BTF/DWARF4 fix) |
 | `methylamphetamine/mt6785-mainline` | `battery-downstream` | `fad73078` | untouched |
 | `methylamphetamine/handoff-mt6785-mainline-begonia` | `main` | this repo | n/a |
 | `aosp-mirror/kernel_common` | `android16-6.12` | `105b5745f` | read-only, never pushed |
@@ -53,9 +53,10 @@ correct as-is. If you would rather ship a single panel:
 
 Flashing the wrong panel gives a black screen. Worth confirming on-device.
 
-### 4. Confirm `build-gki` CI after `5753436e3`
+### 4. Confirm `build-gki` CI after `4d64ed27`
 
-First run failed on `TREE` mismatch; fixed but not yet re-verified.
+Two failures fixed so far: `TREE` mismatch, then the BTF/`resolve_btfids` EINVAL
+(root-caused to pahole 1.25 + DWARF5 -> forced DWARF4). Awaiting a green run.
 
 ### 5. Decide whether GKI work continues
 
